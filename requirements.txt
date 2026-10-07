@@ -1,0 +1,4 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pyjwt[crypto]>=2.8                # verifies Identity-Aware Proxy headers on Google Cloud
+google-cloud-firestore>=2.16      # PORTAL_STORE=firestore (Cloud Run)
