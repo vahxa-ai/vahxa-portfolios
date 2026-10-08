@@ -1,190 +1,116 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
-import { api, errorText, when, type AccessRecord, type AccessStatus, type AppDef, type Me } from '../api'
+import { api, errorText, when, type AccessStatus, type AppDef, type Me, type Person } from '../api'
 
-type Tab = 'requests' | 'access' | 'people' | 'apps'
-
-const TABS: [Tab, string][] = [['requests', 'Requests'], ['access', 'Access'], ['people', 'People'], ['apps', 'Apps']]
+type Tab = 'people' | 'apps'
 
 export default function AdminPage({ me }: { me: Me }) {
-  const [tab, setTab] = useState<Tab>('requests')
+  const [tab, setTab] = useState<Tab>('people')
   return (
     <div className="stack" style={{ gap: 20 }}>
       <header className="page-head">
         <h1>Admin</h1>
-        <p>Approve who can use each app, manage admins and keep the app list up to date.</p>
+        <p>Approve who can use the portal and keep the app list up to date. Access inside each app is
+          approved in that app.</p>
       </header>
       <div className="tabs" role="tablist">
-        {TABS.map(([t, label]) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>
-            {label}{t === 'requests' && me.pending_requests > 0 && <span className="count">{me.pending_requests}</span>}
-          </button>
-        ))}
+        <button role="tab" aria-selected={tab === 'people'} className={tab === 'people' ? 'on' : ''} onClick={() => setTab('people')}>
+          People{me.pending_requests > 0 && <span className="count">{me.pending_requests}</span>}
+        </button>
+        <button role="tab" aria-selected={tab === 'apps'} className={tab === 'apps' ? 'on' : ''} onClick={() => setTab('apps')}>Apps</button>
       </div>
-      {tab === 'requests' && <Requests />}
-      {tab === 'access' && <Access />}
-      {tab === 'people' && <People me={me} />}
-      {tab === 'apps' && <Apps />}
+      {tab === 'people' ? <People me={me} /> : <Apps />}
     </div>
   )
 }
 
-/** Refresh everything an access change affects. */
+/** Refresh everything a change can affect. */
 function useRefresh() {
   const qc = useQueryClient()
-  return () => ['access', 'people', 'me', 'apps', 'appDefs'].forEach(k => qc.invalidateQueries({ queryKey: [k] }))
-}
-
-// ------------------------------------------------------------------ pending requests
-function Requests() {
-  const pending = useQuery({ queryKey: ['access', 'pending'], queryFn: () => api.access('pending'), refetchInterval: 20_000 })
-  const refresh = useRefresh()
-  const decide = useMutation({
-    mutationFn: ({ r, status }: { r: AccessRecord; status: 'approved' | 'denied' }) => api.decide(r.app_id, r.email, status),
-    onSuccess: refresh,
-  })
-
-  return (
-    <div className="stack">
-      <section className="card">
-        <h2>Waiting for a decision</h2>
-        {pending.isLoading ? <div className="loading">Loading…</div>
-          : pending.isError ? <div className="notice error">{errorText(pending.error)}</div>
-          : !pending.data?.length ? <div className="empty">No requests waiting.</div>
-          : pending.data.map(r => (
-            <div key={`${r.app_id}/${r.email}`} className="request-row">
-              <div className="who">
-                <strong>{r.name || r.email}</strong>{r.name && <span className="muted"> · {r.email}</span>}
-                <div className="muted small">wants <b>{r.app_name}</b> · asked {when(r.requested_at)}</div>
-                {r.note && <p className="note">{r.note}</p>}
-              </div>
-              <div className="actions">
-                <button className="btn primary" disabled={decide.isPending} onClick={() => decide.mutate({ r, status: 'approved' })}>Approve</button>
-                <button className="btn danger" disabled={decide.isPending} onClick={() => decide.mutate({ r, status: 'denied' })}>Deny</button>
-              </div>
-            </div>
-          ))}
-        {decide.isError && <div className="notice error">{errorText(decide.error)}</div>}
-      </section>
-      <GrantForm />
-    </div>
-  )
-}
-
-function GrantForm() {
-  const apps = useQuery({ queryKey: ['appDefs'], queryFn: api.appDefs })
-  const [email, setEmail] = useState('')
-  const [appId, setAppId] = useState('')
-  const refresh = useRefresh()
-  const grant = useMutation({
-    mutationFn: () => api.grant(email.trim(), appId || apps.data?.[0]?.id || ''),
-    onSuccess: () => { setEmail(''); refresh() },
-  })
-  const submit = (e: FormEvent) => { e.preventDefault(); grant.mutate() }
-
-  return (
-    <section className="card">
-      <h2>Give someone access</h2>
-      <p className="muted small" style={{ marginTop: -6 }}>No request needed: the app shows up for them the next time they sign in with this Gmail address.</p>
-      <form className="inline-form" onSubmit={submit}>
-        <label className="field"><span>Gmail address</span>
-          <input type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="name@gmail.com" />
-        </label>
-        <label className="field"><span>App</span>
-          <select value={appId || apps.data?.[0]?.id || ''} onChange={e => setAppId(e.target.value)}>
-            {apps.data?.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
-        </label>
-        <button className="btn primary" type="submit" disabled={grant.isPending || !apps.data?.length}>Grant access</button>
-      </form>
-      {grant.isError && <div className="notice error" style={{ marginTop: 10 }}>{errorText(grant.error)}</div>}
-      {grant.isSuccess && <div className="notice ok" style={{ marginTop: 10 }}>Access granted.</div>}
-    </section>
-  )
-}
-
-// ------------------------------------------------------------------ all access records
-const FILTERS: (AccessStatus | 'all')[] = ['all', 'approved', 'pending', 'denied', 'revoked']
-
-function Access() {
-  const [filter, setFilter] = useState<AccessStatus | 'all'>('approved')
-  const rows = useQuery({ queryKey: ['access', filter], queryFn: () => api.access(filter === 'all' ? undefined : filter) })
-  const refresh = useRefresh()
-  const decide = useMutation({
-    mutationFn: ({ r, status }: { r: AccessRecord; status: 'approved' | 'revoked' }) => api.decide(r.app_id, r.email, status),
-    onSuccess: refresh,
-  })
-
-  return (
-    <section className="card">
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-        <h2 style={{ margin: 0 }}>Who can use what</h2>
-        <div className="segmented" role="group" aria-label="Filter by status">
-          {FILTERS.map(f => (
-            <button key={f} className={filter === f ? 'on' : ''} aria-pressed={filter === f} onClick={() => setFilter(f)}>
-              {f[0].toUpperCase() + f.slice(1)}
-            </button>
-          ))}
-        </div>
-      </div>
-      {rows.isLoading ? <div className="loading">Loading…</div>
-        : rows.isError ? <div className="notice error">{errorText(rows.error)}</div>
-        : !rows.data?.length ? <div className="empty">Nothing here.</div>
-        : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Person</th><th>App</th><th>Status</th><th>Decided</th><th /></tr></thead>
-              <tbody>
-                {rows.data.map(r => (
-                  <tr key={`${r.app_id}/${r.email}`}>
-                    <td><div>{r.email}</div>{r.name && <div className="muted small">{r.name}</div>}</td>
-                    <td>{r.app_name}</td>
-                    <td><span className={`pill ${r.status}`}>{r.status}</span></td>
-                    <td className="small">{when(r.decided_at)}{r.decided_by && <div className="muted">by {r.decided_by}</div>}</td>
-                    <td className="actions">
-                      {r.status === 'approved' && <button className="btn sm danger" disabled={decide.isPending} onClick={() => decide.mutate({ r, status: 'revoked' })}>Revoke</button>}
-                      {(r.status === 'denied' || r.status === 'revoked') && <button className="btn sm" disabled={decide.isPending} onClick={() => decide.mutate({ r, status: 'approved' })}>Approve</button>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      {decide.isError && <div className="notice error">{errorText(decide.error)}</div>}
-    </section>
-  )
+  return () => ['people', 'me', 'apps', 'appDefs'].forEach(k => qc.invalidateQueries({ queryKey: [k] }))
 }
 
 // ------------------------------------------------------------------ people
+const FILTERS: (AccessStatus | 'all')[] = ['all', 'approved', 'denied', 'revoked']
+const STATUS_LABEL: Record<string, string> = {
+  pending: 'Waiting', approved: 'Approved', denied: 'Denied', revoked: 'Revoked',
+}
+
 function People({ me }: { me: Me }) {
-  const people = useQuery({ queryKey: ['people'], queryFn: api.people })
+  const people = useQuery({ queryKey: ['people'], queryFn: api.people, refetchInterval: 20_000 })
+  const [filter, setFilter] = useState<AccessStatus | 'all'>('all')
   const refresh = useRefresh()
+  const decide = useMutation({
+    mutationFn: ({ email, status }: { email: string; status: 'approved' | 'denied' | 'revoked' }) => api.decide(email, status),
+    onSuccess: refresh,
+  })
   const setRole = useMutation({
     mutationFn: ({ email, role }: { email: string; role: 'user' | 'admin' }) => api.setRole(email, role),
     onSuccess: refresh,
   })
 
+  if (people.isLoading) return <div className="loading">Loading…</div>
+  if (people.isError) return <div className="notice error">{errorText(people.error)}</div>
+  const all = people.data ?? []
+  const pending = all.filter(p => p.status === 'pending')
+  const others = all.filter(p => p.status !== 'pending' && (filter === 'all' || p.status === filter))
+  const busy = decide.isPending || setRole.isPending
+  const editable = (p: Person) => !p.permanent && p.email !== me.email
+
   return (
-    <section className="card">
-      <h2>People who signed in</h2>
-      {people.isLoading ? <div className="loading">Loading…</div>
-        : people.isError ? <div className="notice error">{errorText(people.error)}</div>
-        : (
+    <div className="stack">
+      <section className="card">
+        <h2>Waiting for a decision</h2>
+        {!pending.length ? <div className="empty">No requests waiting.</div> : pending.map(p => (
+          <div key={p.email} className="request-row">
+            <div className="who">
+              <strong>{p.name || p.email}</strong>{p.name && <span className="muted"> · {p.email}</span>}
+              <div className="muted small">asked {when(p.requested_at)}</div>
+              {p.reason && <p className="note">{p.reason}</p>}
+            </div>
+            <div className="actions">
+              <button className="btn primary" disabled={busy} onClick={() => decide.mutate({ email: p.email, status: 'approved' })}>Approve</button>
+              <button className="btn danger" disabled={busy} onClick={() => decide.mutate({ email: p.email, status: 'denied' })}>Deny</button>
+            </div>
+          </div>
+        ))}
+      </section>
+
+      <InviteForm />
+
+      <section className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+          <h2 style={{ margin: 0 }}>Everyone</h2>
+          <div className="segmented" role="group" aria-label="Filter by status">
+            {FILTERS.map(f => (
+              <button key={f} className={filter === f ? 'on' : ''} aria-pressed={filter === f} onClick={() => setFilter(f)}>
+                {f === 'all' ? 'All' : STATUS_LABEL[f]}
+              </button>
+            ))}
+          </div>
+        </div>
+        {!others.length ? <div className="empty">Nobody here.</div> : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Person</th><th>Role</th><th>Apps</th><th>Last seen</th><th /></tr></thead>
+              <thead><tr><th>Person</th><th>Access</th><th>Role</th><th>Last seen</th><th /></tr></thead>
               <tbody>
-                {people.data!.map(p => (
+                {others.map(p => (
                   <tr key={p.email}>
                     <td><div>{p.email}</div>{p.name && <div className="muted small">{p.name}</div>}</td>
+                    <td>
+                      {p.status ? <span className={`pill ${p.status}`}>{STATUS_LABEL[p.status]}</span> : <span className="pill none">Never asked</span>}
+                      {p.decided_by && <div className="muted small">by {p.decided_by}, {when(p.decided_at)}</div>}
+                    </td>
                     <td><span className={`pill ${p.role}`}>{p.role}{p.permanent ? ' · permanent' : ''}</span></td>
-                    <td className="small">{p.role === 'admin' ? 'all' : `${p.approved} approved`}{p.pending > 0 && <span className="muted"> · {p.pending} pending</span>}</td>
                     <td className="small">{p.last_seen ? when(p.last_seen) : <span className="muted">never signed in</span>}</td>
                     <td className="actions">
-                      {!p.permanent && p.email !== me.email && (p.role === 'admin'
-                        ? <button className="btn sm" disabled={setRole.isPending} onClick={() => setRole.mutate({ email: p.email, role: 'user' })}>Remove admin</button>
-                        : <button className="btn sm" disabled={setRole.isPending} onClick={() => setRole.mutate({ email: p.email, role: 'admin' })}>Make admin</button>)}
+                      {editable(p) && p.status === 'approved' && (p.role === 'admin'
+                        ? <button className="btn sm" disabled={busy} onClick={() => setRole.mutate({ email: p.email, role: 'user' })}>Remove admin</button>
+                        : <button className="btn sm" disabled={busy} onClick={() => setRole.mutate({ email: p.email, role: 'admin' })}>Make admin</button>)}
+                      {editable(p) && p.status === 'approved' &&
+                        <button className="btn sm danger" disabled={busy} onClick={() => decide.mutate({ email: p.email, status: 'revoked' })}>Revoke</button>}
+                      {editable(p) && p.status !== 'approved' &&
+                        <button className="btn sm" disabled={busy} onClick={() => decide.mutate({ email: p.email, status: 'approved' })}>Approve</button>}
                     </td>
                   </tr>
                 ))}
@@ -192,7 +118,30 @@ function People({ me }: { me: Me }) {
             </table>
           </div>
         )}
-      {setRole.isError && <div className="notice error">{errorText(setRole.error)}</div>}
+        {(decide.isError || setRole.isError) && <div className="notice error">{errorText(decide.error ?? setRole.error)}</div>}
+      </section>
+    </div>
+  )
+}
+
+function InviteForm() {
+  const [email, setEmail] = useState('')
+  const refresh = useRefresh()
+  const invite = useMutation({ mutationFn: () => api.invite(email.trim()), onSuccess: () => { setEmail(''); refresh() } })
+  const submit = (e: FormEvent) => { e.preventDefault(); invite.mutate() }
+
+  return (
+    <section className="card">
+      <h2>Approve someone in advance</h2>
+      <p className="muted small" style={{ marginTop: -6 }}>No request needed: they go straight to the apps the first time they sign in with this Gmail address.</p>
+      <form className="inline-form" onSubmit={submit}>
+        <label className="field"><span>Gmail address</span>
+          <input type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="name@gmail.com" />
+        </label>
+        <button className="btn primary" type="submit" disabled={invite.isPending}>Approve</button>
+      </form>
+      {invite.isError && <div className="notice error" style={{ marginTop: 10 }}>{errorText(invite.error)}</div>}
+      {invite.isSuccess && <div className="notice ok" style={{ marginTop: 10 }}>Approved.</div>}
     </section>
   )
 }

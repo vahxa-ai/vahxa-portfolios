@@ -40,7 +40,14 @@ def store() -> Store:
 
 
 def user(request: Request, st: Store = Depends(store)) -> dict:
+    """Any signed-in person, approved or not."""
     return access.current_user(request, st)
+
+
+def member(u: dict = Depends(user)) -> dict:
+    """Someone approved to use the portal."""
+    access.require_approved(u)
+    return u
 
 
 def admin(u: dict = Depends(user)) -> dict:
@@ -50,17 +57,16 @@ def admin(u: dict = Depends(user)) -> dict:
 
 # ------------------------------------------------------------------ models
 class AccessRequest(BaseModel):
-    note: str = Field(default="", max_length=1000)
     name: str = Field(default="", max_length=100)
+    reason: str = Field(default="", max_length=1000)
 
 
 class Decision(BaseModel):
     status: Literal["approved", "denied", "revoked"]
 
 
-class Grant(BaseModel):
+class Invite(BaseModel):
     email: str = Field(max_length=254)
-    app_id: str
 
 
 class RoleChange(BaseModel):
@@ -91,7 +97,7 @@ class AppIn(BaseModel):
         return v
 
 
-# ------------------------------------------------------------------ everyone
+# ------------------------------------------------------------------ everyone signed in
 @api.get("/healthz", include_in_schema=False)
 def healthz():
     return {"ok": True}
@@ -100,53 +106,40 @@ def healthz():
 @api.get("/me")
 def me(request: Request, st: Store = Depends(store)):
     u = access.current_user(request, st, touch=True)
-    pending = len(st.list_access(status="pending")) if u["role"] == "admin" else 0
+    pending = sum(1 for p in st.list_users() if p.get("status") == "pending") if u["role"] == "admin" else 0
     return {**u, "auth_enabled": access.enabled(), "pending_requests": pending}
 
 
+@api.post("/access/request")
+def request_access(body: AccessRequest, u: dict = Depends(user), st: Store = Depends(store)):
+    return access.request_access(st, u, body.name, body.reason)
+
+
+# ------------------------------------------------------------------ approved people
 @api.get("/apps")
-def apps(u: dict = Depends(user), st: Store = Depends(store)):
-    return access.catalog_for(st, u)
+def apps(_m: dict = Depends(member), st: Store = Depends(store)):
+    keys = ("id", "name", "description", "url", "project", "order")
+    return [{k: a.get(k) for k in keys} for a in access.sort_apps(st.list_apps())]
 
 
-@api.post("/apps/{app_id}/request")
-def request_app(app_id: str, body: AccessRequest, u: dict = Depends(user), st: Store = Depends(store)):
-    return access.request_access(st, u, app_id, body.note, body.name)
+# ------------------------------------------------------------------ admin: people
+@api.get("/admin/people")
+def people(_a: dict = Depends(admin), st: Store = Depends(store)):
+    return access.people(st)
 
 
-@api.delete("/apps/{app_id}/request")
-def withdraw_request(app_id: str, u: dict = Depends(user), st: Store = Depends(store)):
-    access.withdraw(st, u, app_id)
-    return {"ok": True}
+@api.post("/admin/people/{email}/decision")
+def decide(email: str, body: Decision, a: dict = Depends(admin), st: Store = Depends(store)):
+    return access.decide(st, a, email, body.status)
 
 
-# ------------------------------------------------------------------ admin: access
-@api.get("/admin/access")
-def list_access(status: str | None = None, _a: dict = Depends(admin), st: Store = Depends(store)):
-    if status and status not in access.STATUSES:
-        raise HTTPException(422, "unknown status")
-    names = {a["id"]: a["name"] for a in st.list_apps()}
-    rows = [{**r, "app_name": names.get(r["app_id"], r["app_id"])} for r in st.list_access(status=status)]
-    return sorted(rows, key=lambda r: r.get("decided_at") or r.get("requested_at") or "", reverse=True)
+@api.post("/admin/people")
+def invite(body: Invite, a: dict = Depends(admin), st: Store = Depends(store)):
+    """Approve a Gmail address before they ever sign in."""
+    return access.decide(st, a, body.email, "approved")
 
 
-@api.post("/admin/access/{app_id}/{email}")
-def decide(app_id: str, email: str, body: Decision, a: dict = Depends(admin), st: Store = Depends(store)):
-    return access.decide(st, a, app_id, email, body.status)
-
-
-@api.post("/admin/grants")
-def grant(body: Grant, a: dict = Depends(admin), st: Store = Depends(store)):
-    return access.decide(st, a, body.app_id, body.email, "approved")
-
-
-# ------------------------------------------------------------------ admin: users
-@api.get("/admin/users")
-def users(_a: dict = Depends(admin), st: Store = Depends(store)):
-    return access.users_view(st)
-
-
-@api.put("/admin/users/{email}/role")
+@api.put("/admin/people/{email}/role")
 def set_role(email: str, body: RoleChange, a: dict = Depends(admin), st: Store = Depends(store)):
     return access.set_role(st, a, email, body.role)
 
@@ -179,7 +172,7 @@ def update_app(app_id: str, body: AppIn, _a: dict = Depends(admin), st: Store = 
 def delete_app(app_id: str, _a: dict = Depends(admin), st: Store = Depends(store)):
     if not st.get_app(app_id):
         raise HTTPException(404, "no such app")
-    st.delete_app(app_id)  # also removes everyone's access records for it
+    st.delete_app(app_id)
     return {"ok": True}
 
 

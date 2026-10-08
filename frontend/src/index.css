@@ -146,3 +146,16 @@ td.actions .btn + .btn { margin-left: 6px; }
 .app-form .wide { grid-column: 1 / -1; }
 .app-form .actions { grid-column: 1 / -1; display: flex; gap: 8px; }
 @media (max-width: 720px) { .app-form { grid-template-columns: minmax(0, 1fr); } }
+
+/* ------------------------------------------------------------------ request-access page */
+.access { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; }
+.access-card { width: 100%; max-width: 480px; padding: 28px; }
+.access-card h1 { font-size: 21px; margin: 16px 0 8px; letter-spacing: -0.01em; }
+.access-card > p { margin: 0 0 16px; }
+.brand-mark.big { width: 40px; height: 40px; border-radius: 10px; font-size: 20px; font-weight: 700; }
+.facts { display: grid; gap: 8px; margin: 0; padding: 12px 14px; border-radius: 8px; background: var(--surface-2); }
+.facts div { display: grid; grid-template-columns: 90px 1fr; gap: 8px; }
+.facts dt { color: var(--muted); font-size: 12.5px; }
+.facts dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.access-foot { margin: 20px 0 0; padding-top: 14px; border-top: 1px solid var(--border); }
+.app-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }

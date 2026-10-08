@@ -1,11 +1,11 @@
-"""Persistence: the app catalog, people who signed in, and their access to each app.
+"""Persistence: the people who use the portal and the app catalog.
 
-Three kinds of record, keyed by lowercase email and app id:
+Two kinds of record:
 
-  users   {email, name, role: user|admin, first_seen, last_seen}
-  apps    {id, name, description, url, project, order}
-  access  {email, app_id, status, note, name, requested_at, decided_at, decided_by}
-          status: pending -> approved | denied;  approved -> revoked
+  users  {email, name, reason, status, role, requested_at, decided_at, decided_by,
+          first_seen, last_seen}                                  keyed by lowercase email
+         status: pending -> approved | denied;  approved -> revoked
+  apps   {id, name, description, url, project, order}             keyed by app id
 
 Two backends with the same interface:
   JsonStore       one JSON file (local use and tests), data/portal.json by default
@@ -23,10 +23,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def access_id(app_id: str, email: str) -> str:
-    return f"{app_id}__{email}"
-
-
 class Store:
     """Interface shared by both backends."""
 
@@ -39,19 +35,9 @@ class Store:
     def put_app(self, app: dict) -> None: raise NotImplementedError
     def delete_app(self, app_id: str) -> None: raise NotImplementedError
     def list_apps(self) -> list[dict]: raise NotImplementedError
-    # access
-    def get_access(self, app_id: str, email: str) -> dict | None: raise NotImplementedError
-    def put_access(self, rec: dict) -> None: raise NotImplementedError
-    def delete_access(self, app_id: str, email: str) -> None: raise NotImplementedError
-    def list_access(self, email: str | None = None, app_id: str | None = None,
-                    status: str | None = None) -> list[dict]: raise NotImplementedError
     # one-off flags (e.g. "the catalog was seeded")
     def get_meta(self, key: str) -> Any: raise NotImplementedError
     def set_meta(self, key: str, value: Any) -> None: raise NotImplementedError
-
-
-def _match(rec: dict, **want) -> bool:
-    return all(v is None or rec.get(k) == v for k, v in want.items())
 
 
 class JsonStore(Store):
@@ -66,7 +52,7 @@ class JsonStore(Store):
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             data = {}
-        for k in ("users", "apps", "access", "meta"):
+        for k in ("users", "apps", "meta"):
             data.setdefault(k, {})
         return data
 
@@ -82,9 +68,13 @@ class JsonStore(Store):
                 time.sleep(0.05)
         os.replace(tmp, self.path)
 
-    def _get(self, kind: str, key: str) -> dict | None:
+    def _get(self, kind: str, key: str):
         with self._lock:
             return self._load()[kind].get(key)
+
+    def _all(self, kind: str) -> list:
+        with self._lock:
+            return list(self._load()[kind].values())
 
     def _put(self, kind: str, key: str, value: Any) -> None:
         with self._lock:
@@ -100,50 +90,26 @@ class JsonStore(Store):
 
     def get_user(self, email): return self._get("users", email)
     def put_user(self, user): self._put("users", user["email"], user)
-    def list_users(self):
-        with self._lock:
-            return list(self._load()["users"].values())
+    def list_users(self): return self._all("users")
 
     def get_app(self, app_id): return self._get("apps", app_id)
     def put_app(self, app): self._put("apps", app["id"], app)
-    def list_apps(self):
-        with self._lock:
-            return list(self._load()["apps"].values())
+    def delete_app(self, app_id): self._delete("apps", app_id)
+    def list_apps(self): return self._all("apps")
 
-    def delete_app(self, app_id):
-        with self._lock:
-            data = self._load()
-            data["apps"].pop(app_id, None)
-            data["access"] = {k: v for k, v in data["access"].items() if v["app_id"] != app_id}
-            self._save(data)
-
-    def get_access(self, app_id, email): return self._get("access", access_id(app_id, email))
-    def put_access(self, rec): self._put("access", access_id(rec["app_id"], rec["email"]), rec)
-    def delete_access(self, app_id, email): self._delete("access", access_id(app_id, email))
-
-    def list_access(self, email=None, app_id=None, status=None):
-        with self._lock:
-            return [r for r in self._load()["access"].values()
-                    if _match(r, email=email, app_id=app_id, status=status)]
-
-    def get_meta(self, key):
-        with self._lock:
-            return self._load()["meta"].get(key)
-
+    def get_meta(self, key): return self._get("meta", key)
     def set_meta(self, key, value): self._put("meta", key, value)
 
 
 class FirestoreStore(Store):
-    """Firestore (Native mode) collections portal_users, portal_apps, portal_access, portal_meta."""
+    """Firestore (Native mode) collections portal_users, portal_apps and portal_meta."""
 
     def __init__(self, client=None):
         if client is None:
             from google.cloud import firestore
             client = firestore.Client(database=os.getenv("PORTAL_FIRESTORE_DB", "(default)"))
-        self.db = client
         self.users = client.collection("portal_users")
         self.apps = client.collection("portal_apps")
-        self.access = client.collection("portal_access")
         self.meta = client.collection("portal_meta")
 
     @staticmethod
@@ -157,29 +123,8 @@ class FirestoreStore(Store):
 
     def get_app(self, app_id): return self._doc(self.apps.document(app_id))
     def put_app(self, app): self.apps.document(app["id"]).set(app)
+    def delete_app(self, app_id): self.apps.document(app_id).delete()
     def list_apps(self): return [d.to_dict() for d in self.apps.stream()]
-
-    @staticmethod
-    def _eq(query, field: str, value):
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        return query.where(filter=FieldFilter(field, "==", value))
-
-    def delete_app(self, app_id):
-        for d in self._eq(self.access, "app_id", app_id).stream():
-            d.reference.delete()
-        self.apps.document(app_id).delete()
-
-    def get_access(self, app_id, email): return self._doc(self.access.document(access_id(app_id, email)))
-    def put_access(self, rec): self.access.document(access_id(rec["app_id"], rec["email"])).set(rec)
-    def delete_access(self, app_id, email): self.access.document(access_id(app_id, email)).delete()
-
-    def list_access(self, email=None, app_id=None, status=None):
-        q = self.access
-        for field, value in (("email", email), ("app_id", app_id), ("status", status)):
-            if value is not None:
-                q = self._eq(q, field, value)
-        # Filtered again in Python, so equality filters on several fields need no composite index.
-        return [r for r in (d.to_dict() for d in q.stream()) if _match(r, email=email, app_id=app_id, status=status)]
 
     def get_meta(self, key):
         d = self._doc(self.meta.document(key))
